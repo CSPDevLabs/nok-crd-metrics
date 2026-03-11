@@ -12,7 +12,7 @@ REGISTRY.unregister(PLATFORM_COLLECTOR)
 DEVIATION_COUNT = Gauge(
     'sdcio_deviation_count', 
     'Number of deviations found in the spec per target', 
-    ['target_name', 'namespace', 'deviation_type']
+    ['target_name', 'namespace', 'name', 'deviation_type']
 )
 
 def monitor_deviations():
@@ -46,16 +46,16 @@ def monitor_deviations():
                 # Extract labels
                 target = metadata.get('labels', {}).get('config.sdcio.dev/targetName', metadata.get('name'))
                 d_type = spec.get('deviationType', 'unknown')
-                namespace = metadata.get('namespace', 'nok-bng')
+                name = metadata.get('name','unknown')
+                namespace = metadata.get('namespace', 'unknown')
                 
-                # 2. Extract the count from spec.deviations list
-                # Defaults to 0 if the deviations key is missing or empty
                 deviations_list = spec.get('deviations', [])
                 count = len(deviations_list)
                 
                 DEVIATION_COUNT.labels(
                     target_name=target, 
-                    namespace=namespace, 
+                    namespace=namespace,
+                    name=name, 
                     deviation_type=d_type
                 ).set(count)
 
