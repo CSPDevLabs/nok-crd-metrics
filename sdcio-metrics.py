@@ -2,23 +2,29 @@ import time
 from prometheus_client import start_http_server, Gauge, REGISTRY, PROCESS_COLLECTOR, GC_COLLECTOR, PLATFORM_COLLECTOR
 from kubernetes import client, config
 
-# 1. Remove default metrics
+# 1. Clean up default metrics
 REGISTRY.unregister(PROCESS_COLLECTOR)
 REGISTRY.unregister(GC_COLLECTOR)
 REGISTRY.unregister(PLATFORM_COLLECTOR)
 
-# Deviation Metric
+# Metrics Definitions
 DEVIATION_COUNT = Gauge(
     'sdcio_deviation_count', 
     'Number of deviations found in the spec per target', 
     ['target_name', 'namespace', 'name', 'deviation_type']
 )
 
-# Target Status Metric
 TARGET_CONFIG_READY = Gauge(
     'sdcio_target_config_ready',
     'Target ConfigReady status (1 for True, 0 for False)',
     ['name', 'namespace', 'address', 'vendor']
+)
+
+# New Metric for Config status
+CONFIG_READY = Gauge(
+    'sdcio_config_ready',
+    'Config Ready status (1 for True, 0 for False)',
+    ['name', 'namespace', 'target_name']
 )
 
 def monitor_resources():
@@ -33,7 +39,7 @@ def monitor_resources():
 
     while True:
         try:
-            # --- PROCESS DEVIATIONS ---
+            # --- 1. PROCESS DEVIATIONS (config.sdcio.dev) ---
             deviations = custom_api.list_namespaced_custom_object(
                 group="config.sdcio.dev", version="v1alpha1",
                 namespace="nok-bng", plural="deviations"
@@ -42,16 +48,15 @@ def monitor_resources():
             for item in deviations.get('items', []):
                 meta = item.get('metadata', {})
                 spec = item.get('spec', {})
-                
                 target = meta.get('labels', {}).get('config.sdcio.dev/targetName', meta.get('name'))
-                d_type = spec.get('deviationType', 'unknown')
-                name = meta.get('name', 'unknown')
-                ns = meta.get('namespace', 'unknown')
-                
-                count = len(spec.get('deviations', []))
-                DEVIATION_COUNT.labels(target_name=target, namespace=ns, name=name, deviation_type=d_type).set(count)
+                DEVIATION_COUNT.labels(
+                    target_name=target, 
+                    namespace=meta.get('namespace', 'nok-bng'), 
+                    name=meta.get('name', 'unknown'), 
+                    deviation_type=spec.get('deviationType', 'unknown')
+                ).set(len(spec.get('deviations', [])))
 
-            # --- PROCESS TARGETS ---
+            # --- 2. PROCESS TARGETS (inv.sdcio.dev) ---
             targets = custom_api.list_namespaced_custom_object(
                 group="inv.sdcio.dev", version="v1alpha1",
                 namespace="nok-bng", plural="targets"
@@ -61,21 +66,37 @@ def monitor_resources():
                 meta = item.get('metadata', {})
                 spec = item.get('spec', {})
                 status = item.get('status', {})
-                
-                name = meta.get('name', 'unknown')
-                ns = meta.get('namespace', 'unknown')
-                address = spec.get('address', 'unknown')
-                vendor = meta.get('labels', {}).get('vendor', 'unknown')
+                is_ready = 1 if any(c.get('type') == 'ConfigReady' and c.get('status') == 'True' for c in status.get('conditions', [])) else 0
+                TARGET_CONFIG_READY.labels(
+                    name=meta.get('name', 'unknown'), 
+                    namespace=meta.get('namespace', 'nok-bng'), 
+                    address=spec.get('address', 'unknown'), 
+                    vendor=meta.get('labels', {}).get('vendor', 'unknown')
+                ).set(is_ready)
 
-                # Check for ConfigReady status
-                is_ready = 0
-                conditions = status.get('conditions', [])
-                for c in conditions:
-                    if c.get('type') == 'ConfigReady' and c.get('status') == 'True':
-                        is_ready = 1
-                        break
+            # --- 3. PROCESS CONFIGS (config.sdcio.dev) ---
+            configs = custom_api.list_namespaced_custom_object(
+                group="config.sdcio.dev", version="v1alpha1",
+                namespace="nok-bng", plural="configs"
+            )
+            CONFIG_READY.clear()
+            for item in configs.get('items', []):
+                meta = item.get('metadata', {})
+                status = item.get('status', {})
                 
-                TARGET_CONFIG_READY.labels(name=name, namespace=ns, address=address, vendor=vendor).set(is_ready)
+                # Labels
+                c_name = meta.get('name', 'unknown')
+                c_namespace = meta.get('namespace', 'nok-bng')
+                c_target = meta.get('labels', {}).get('config.sdcio.dev/targetName', 'unknown')
+
+                # Check Ready condition
+                c_is_ready = 1 if any(c.get('type') == 'Ready' and c.get('status') == 'True' for c in status.get('conditions', [])) else 0
+                
+                CONFIG_READY.labels(
+                    name=c_name, 
+                    namespace=c_namespace, 
+                    target_name=c_target
+                ).set(c_is_ready)
 
             time.sleep(30)
             
