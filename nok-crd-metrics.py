@@ -69,7 +69,7 @@ class GenericCrdExporter:
             # This handles 'True', 'Ready', 'Reachable', etc.
             if val_str in ['true', 'reachable', 'enabled', 'ready', 'ok']:
                 return 1
-            else ['false', 'unreachable', 'disabled', 'notready', 'failed']:
+            if val_str in ['false', 'unreachable', 'disabled', 'notready', 'failed']:
                 return 0
 
             # 5. Numeric fallback
