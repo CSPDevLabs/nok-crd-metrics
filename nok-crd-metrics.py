@@ -32,6 +32,40 @@ class GenericCrdExporter:
     def resolve_path(self, item, path):
         """Extracts values from K8s objects using JSONPath."""
         try:
+            # 1. Handle special boolean logic for 'Ready' conditions
+            if "status.conditions" in path:
+                conds = item.get('status', {}).get('conditions', [])
+                # Extract the type we are looking for from the path, e.g., 'Ready' or 'ConfigReady'
+                target_type = "Ready" if "ConfigReady" not in path else "ConfigReady"
+                return 1 if any(c.get('type') == target_type and c.get('status') == 'True' for c in conds) else 0
+            
+            # 2. Standard JSONPath extraction
+            # Strip '.length' if present to get the actual list first
+            is_length_query = False
+            search_path = path
+            if path.endswith('.length'):
+                is_length_query = True
+                search_path = path[:-7] # Remove '.length'
+
+            jsonpath_expr = parse(search_path)
+            matches = [match.value for match in jsonpath_expr.find(item)]
+            
+            if not matches:
+                return 0 if is_length_query else "unknown"
+
+            # 3. Return logic
+            result = matches[0] # Take first match
+            
+            if is_length_query:
+                return len(result) if isinstance(result, list) else 1
+            
+            return result
+        except Exception as e:
+            logger.error(f"Path resolution error for {path}: {e}")
+            return 0 if "length" in path else "unknown"
+
+        """Extracts values from K8s objects using JSONPath."""
+        try:
             # Handle special boolean logic for 'Ready' conditions
             if "status.conditions" in path and "Ready" in path:
                 conds = item.get('status', {}).get('conditions', [])

@@ -4,7 +4,7 @@ metadata:
   name: sdcio-deviations
   namespace: my-namespace
 spec:
-  metricName: "cr_deviation_count"
+  metricName: "sdcio_deviation_count"
   help: "Count of deviations in sdcio objects"
   resource:
     group: "config.sdcio.dev"
