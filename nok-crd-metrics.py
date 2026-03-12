@@ -31,8 +31,8 @@ class GenericCrdExporter:
         
         self.custom_api = client.CustomObjectsApi()
 
-    def resolve_path(self, item, path):
-        """Extracts values using JSONPath with support for filters and length."""
+    def resolve_path(self, item, path, is_label=False):
+        """Extracts values. Labels stay strings, values become 1/0/float."""
         res_name = item.get('metadata', {}).get('name', 'unknown')
         try:
             is_length_query = False
@@ -41,46 +41,43 @@ class GenericCrdExporter:
                 is_length_query = True
                 search_path = path[:-7]
 
-            # Use the extended parser (jsonpath_ng.ext) to support [?(@...)]
-            jsonpath_expr = parse(search_path)
+            # Use the extended parser for [?(@...)]
+            from jsonpath_ng.ext import parse as ext_parse
+            jsonpath_expr = ext_parse(search_path)
             matches = [match.value for match in jsonpath_expr.find(item)]
             
             if not matches:
-                return 0 if is_length_query else "unknown"
+                return "unknown" if is_label else 0
 
-            # 1. Handle Length Queries
+            # Unpack first match
+            val = matches[0]
+
+            # --- IF IT'S A LABEL, RETURN AS STRING ---
+            if is_label:
+                return str(val)
+
+            # --- IF IT'S A VALUE, NORMALIZE TO NUMBER ---
             if is_length_query:
-                # If the match itself is a list, return its length
-                # matches[0] because find() returns a list of results
-                val = matches[0]
-                return len(val) if isinstance(val, list) else len(matches)
+                return float(len(val)) if isinstance(val, list) else float(len(matches))
 
-            # 2. Extract Value (Take first match from the filter)
-            val = matches[0] 
-
-            # Debugging is good to keep for now
-            # logger.info(f"[DEBUG] {res_name} | Path: {path} | Raw: {val} | Type: {type(val)}")
-
-            # 3. Normalization to 1/0
             if isinstance(val, bool):
-                return 1 if val else 0
+                return 1.0 if val else 0.0
             
             val_str = str(val).strip().lower()
             if val_str in ['true', 'reachable', 'enabled', 'ready', 'ok']:
-                return 1
+                return 1.0
             if val_str in ['false', 'unreachable', 'disabled', 'notready', 'failed']:
-                return 0
+                return 0.0
 
-            # 4. Numeric fallback
             try:
                 return float(val)
             except:
-                return 0
+                return 0.0
                 
         except Exception as e:
-            # This is where we saw the 'Unexpected character: ?' error
             logger.error(f"Path error {path} on {res_name}: {e}")
-            return 0
+            return "error" if is_label else 0.0
+
 
 
 
@@ -135,17 +132,19 @@ class GenericCrdExporter:
                     )
 
                     gauge = self.metrics[m_name]
+                    # Inside scrape_loop...
                     for item in items.get('items', []):
-                        labels = {lm['label']: str(self.resolve_path(item, lm['path'])) 
-                                 for lm in spec['labelMappings']}
+                        # Pass is_label=True here so 'type' doesn't become '0'
+                        labels = {lm['label']: str(self.resolve_path(item, lm['path'], is_label=True)) 
+                                for lm in spec['labelMappings']}
+                        
                         labels['resource_name'] = item['metadata']['name']
                         labels['resource_namespace'] = item['metadata']['namespace']
                         
+                        # This remains is_label=False (default) for the actual gauge value
                         val = self.resolve_path(item, spec['valuePath'])
-                        try:
-                            gauge.labels(**labels).set(float(val))
-                        except:
-                            gauge.labels(**labels).set(0)
+                        gauge.labels(**labels).set(float(val))
+
                 except Exception as e:
                     logger.error(f"Scrape Error [{m_name}]: {e}")
             
