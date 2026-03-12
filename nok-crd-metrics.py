@@ -2,7 +2,7 @@ import os
 import time
 import logging
 from threading import Thread
-from jsonpath_ng import parse
+from jsonpath_ng.ext import parse 
 from prometheus_client import start_http_server, Gauge, CollectorRegistry
 from kubernetes import client, config, watch
 
@@ -41,44 +41,44 @@ class GenericCrdExporter:
                 is_length_query = True
                 search_path = path[:-7]
 
+            # Use the extended parser (jsonpath_ng.ext) to support [?(@...)]
             jsonpath_expr = parse(search_path)
             matches = [match.value for match in jsonpath_expr.find(item)]
             
-            # --- DEBUG LOG 1: What did JSONPath find? ---
-            # logger.info(f"[DEBUG] Resource: {res_name} | Path: {path} | Matches: {matches}")
-
             if not matches:
                 return 0 if is_length_query else "unknown"
 
+            # 1. Handle Length Queries
             if is_length_query:
-                # If match[0] is a list, count its items, else count the matches found
-                val = len(matches[0]) if isinstance(matches[0], list) else len(matches)
-                return val
+                # If the match itself is a list, return its length
+                # matches[0] because find() returns a list of results
+                val = matches[0]
+                return len(val) if isinstance(val, list) else len(matches)
 
-            # Unpack the first match
+            # 2. Extract Value (Take first match from the filter)
             val = matches[0] 
-            
-            # --- DEBUG LOG 2: After unpacking ---
-            logger.info(f"[DEBUG] Resource: {res_name} | Path: {path} | Raw Value: {val} | Type: {type(val)}")
 
-            # Handle Booleans (K8s sometimes returns actual bools, not strings)
+            # Debugging is good to keep for now
+            # logger.info(f"[DEBUG] {res_name} | Path: {path} | Raw: {val} | Type: {type(val)}")
+
+            # 3. Normalization to 1/0
             if isinstance(val, bool):
                 return 1 if val else 0
             
-            # Handle Strings
             val_str = str(val).strip().lower()
             if val_str in ['true', 'reachable', 'enabled', 'ready', 'ok']:
                 return 1
             if val_str in ['false', 'unreachable', 'disabled', 'notready', 'failed']:
                 return 0
 
-            # Numeric fallback
+            # 4. Numeric fallback
             try:
                 return float(val)
-            except (ValueError, TypeError):
+            except:
                 return 0
                 
         except Exception as e:
+            # This is where we saw the 'Unexpected character: ?' error
             logger.error(f"Path error {path} on {res_name}: {e}")
             return 0
 
