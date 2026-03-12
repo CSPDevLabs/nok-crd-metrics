@@ -32,33 +32,46 @@ class GenericCrdExporter:
         self.custom_api = client.CustomObjectsApi()
 
     def resolve_path(self, item, path):
-        """Extracts values from K8s objects using JSONPath."""
+        """Extracts values using JSONPath with support for filters and length."""
         try:
-            # Handle Ready/ConfigReady Conditions
-            if "status.conditions" in path:
-                conds = item.get('status', {}).get('conditions', [])
-                target_type = "ConfigReady" if "ConfigReady" in path else "Ready"
-                return 1 if any(c.get('type') == target_type and c.get('status') == 'True' for c in conds) else 0
-            
-            # Handle .length suffix manually
+            # 1. Handle manual .length suffix
             is_length_query = False
             search_path = path
             if path.endswith('.length'):
                 is_length_query = True
                 search_path = path[:-7]
 
+            # 2. Execute JSONPath (handles filters like [?(@.type=='Ready')])
             jsonpath_expr = parse(search_path)
             matches = [match.value for match in jsonpath_expr.find(item)]
             
             if not matches:
                 return 0 if is_length_query else "unknown"
 
-            val = matches[0] # Take first match
+            # If it's a length query, return the count of matches
             if is_length_query:
-                return len(val) if isinstance(val, list) else 1
+                # If the match itself is a list (like spec.deviations), count its items
+                # otherwise count the number of matches found by JSONPath
+                first_match = matches[0]
+                return len(first_match) if isinstance(first_match, list) else len(matches)
+
+            # 3. Value Normalization (Take the first match)
+            val = matches[0]
+
+            # Convert Booleans or specific Strings to 1/0
+            if isinstance(val, bool):
+                return 1 if val else 0
+            
+            val_str = str(val).lower()
+            if val_str in ['true', 'reachable', 'enabled', 'ready']:
+                return 1
+            if val_str in ['false', 'unreachable', 'disabled', 'notready']:
+                return 0
+
             return val
-        except Exception:
-            return 0 if "length" in path else "unknown"
+        except Exception as e:
+            logger.error(f"Path error {path}: {e}")
+            return 0
 
     def watch_definitions(self):
         """Watcher thread: Reconciles MetricDefinition CRDs."""
