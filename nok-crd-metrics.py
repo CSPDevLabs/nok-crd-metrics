@@ -11,12 +11,13 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("nok-crd-metrics")
 
 # Add an environment variable to filter CRDs
-self.app_filter = os.getenv("METRIC_APP_LABEL", "")
+
 
 class GenericCrdExporter:
     def __init__(self):
         # 1. Create a CLEAN registry (removes default CPU/Mem/Python metrics)
         self.registry = CollectorRegistry()
+        self.app_filter = os.getenv("METRIC_APP_LABEL", "")
         
         try:
             with open("/var/run/secrets/kubernetes.io/serviceaccount/namespace", "r") as f:
