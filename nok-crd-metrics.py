@@ -34,47 +34,54 @@ class GenericCrdExporter:
     def resolve_path(self, item, path):
         """Extracts values using JSONPath with support for filters and length."""
         try:
+            # 1. Handle .length suffix
             is_length_query = False
             search_path = path
             if path.endswith('.length'):
                 is_length_query = True
                 search_path = path[:-7]
 
+            # 2. Parse and Find
             jsonpath_expr = parse(search_path)
             matches = [match.value for match in jsonpath_expr.find(item)]
             
             if not matches:
                 return 0 if is_length_query else "unknown"
 
-            # If it's a length query, return the count
+            # 3. Handle Length Queries
             if is_length_query:
-                # If the match itself is a list (like spec.deviations), return its length
-                return len(matches[0]) if isinstance(matches[0], list) else len(matches)
+                # If the first match is a list (like spec.deviations), return its length
+                if isinstance(matches[0], list):
+                    return len(matches[0])
+                # Otherwise return how many matches the JSONPath found
+                return len(matches)
 
-            # --- FIX STARTS HERE ---
-            # Take the FIRST match from the list returned by JSONPath
-            val = matches[0]
+            # --- FIX: Extract the actual value from the match list ---
+            # JSONPath filters ALWAYS return a list of matches. 
+            # We want the first one.
+            val = matches[0] 
 
-            # Convert Booleans
+            # 4. Normalization to 1/0
             if isinstance(val, bool):
                 return 1 if val else 0
             
-            # Convert Strings (True, Ready, Reachable, etc)
             val_str = str(val).strip().lower()
-            if val_str in ['true', 'reachable', 'enabled', 'ready']:
+            # This handles 'True', 'Ready', 'Reachable', etc.
+            if val_str in ['true', 'reachable', 'enabled', 'ready', 'ok']:
                 return 1
-            if val_str in ['false', 'unreachable', 'disabled', 'notready']:
+            else ['false', 'unreachable', 'disabled', 'notready', 'failed']:
                 return 0
-            # --- FIX ENDS HERE ---
 
-            # Try to return as float, otherwise 0
+            # 5. Numeric fallback
             try:
                 return float(val)
-            except:
+            except (ValueError, TypeError):
                 return 0
+                
         except Exception as e:
             logger.error(f"Path error {path}: {e}")
             return 0
+
 
 
     def watch_definitions(self):
