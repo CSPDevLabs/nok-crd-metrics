@@ -5,6 +5,7 @@ from threading import Thread
 from jsonpath_ng.ext import parse 
 from prometheus_client import start_http_server, Gauge, CollectorRegistry
 from kubernetes import client, config, watch
+from kubernetes.client.exceptions import ApiException
 
 # Generic Logger
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -82,7 +83,25 @@ class GenericCrdExporter:
             logger.error(f"Path error {path} on {res_name}: {e}")
             return "error" if is_label else 0.0
 
-
+    def wait_for_rbac(self):
+        logger.info("Waiting for RBAC permissions...")
+        while True:
+            try:
+                self.custom_api.list_namespaced_custom_object(
+                    group="nok.dev",
+                    version="v1alpha1",
+                    namespace=self.namespace,
+                    plural="networkdevicetargets",
+                    limit=1
+                )
+                logger.info("RBAC permissions confirmed")
+                return
+            except client.exceptions.ApiException as e:
+                if e.status == 403:
+                    logger.info("RBAC not ready yet, retrying...")
+                    time.sleep(5)
+                else:
+                    raise
 
 
     def watch_definitions(self):
@@ -150,12 +169,20 @@ class GenericCrdExporter:
                         val = self.resolve_path(item, spec['valuePath'])
                         gauge.labels(**labels).set(float(val))
 
-                except Exception as e:
-                    logger.error(f"Scrape Error [{m_name}]: {e}")
+                except ApiException as e:
+                    if e.status == 403:
+                        logger.warning(
+                            f"RBAC not ready for {m_name}. Will retry."
+                        )
+                        time.sleep(5)
+                        continue
+                    else:
+                        logger.error(f"Scrape Error [{m_name}]: {e}")
             
             time.sleep(30)
 
 if __name__ == '__main__':
     app = GenericCrdExporter()
+    app.wait_for_rbac()
     Thread(target=app.watch_definitions, daemon=True).start()
     app.scrape_loop()
