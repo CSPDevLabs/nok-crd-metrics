@@ -98,8 +98,10 @@ class GenericCrdExporter:
                 return
             except client.exceptions.ApiException as e:
                 if e.status == 403:
-                    logger.info("RBAC not ready yet, retrying...")
+                    logger.warning(f"RBAC denied for {m_name}. Removing from cache to trigger re-sync.")
+                    self.definitions.pop(m_name, None) # Drop it so we stop looping on it
                     time.sleep(5)
+                    continue
                 else:
                     raise
 
