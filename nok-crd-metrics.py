@@ -171,9 +171,8 @@ class GenericCrdExporter:
 
                 except ApiException as e:
                     if e.status == 403:
-                        logger.warning(
-                            f"RBAC not ready for {m_name}. Will retry."
-                        )
+                        logger.warning(f"RBAC denied for {m_name}. Removing from cache to trigger re-sync.")
+                        self.definitions.pop(m_name, None) # Drop it so we stop looping on it
                         time.sleep(5)
                         continue
                     else:
