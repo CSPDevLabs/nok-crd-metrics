@@ -2,38 +2,64 @@ import os
 import time
 import logging
 from threading import Thread
-from jsonpath_ng.ext import parse 
+from jsonpath_ng.ext import parse
 from prometheus_client import start_http_server, Gauge, CollectorRegistry
 from kubernetes import client, config, watch
 from kubernetes.client.exceptions import ApiException
+from http.server import BaseHTTPRequestHandler, HTTPServer # Import for health endpoint
 
 # Generic Logger
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger("nok-crd-metrics")
 
-# Add an environment variable to filter CRDs
+# Global health status
+HEALTH_STATUS = {"ok": True, "message": "All metrics are scraping successfully."}
 
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    """
+    A simple HTTP handler for the /healthy endpoint.
+    """
+    def do_GET(self):
+        if self.path == '/healthy':
+            if HEALTH_STATUS["ok"]:
+                self.send_response(200)
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(b"OK")
+            else:
+                self.send_response(500)
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(f"FAILED: {HEALTH_STATUS['message']}".encode('utf-8'))
+        else:
+            self.send_response(404)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b"Not Found")
+
+    def log_message(self, format, *args):
+        # Suppress HTTP server access logs to keep main app logs clean
+        pass
 
 class GenericCrdExporter:
     def __init__(self):
-        # 1. Create a CLEAN registry (removes default CPU/Mem/Python metrics)
         self.registry = CollectorRegistry()
         self.app_filter = os.getenv("METRIC_APP_LABEL", "")
-        
+
         try:
             with open("/var/run/secrets/kubernetes.io/serviceaccount/namespace", "r") as f:
                 self.namespace = f.read().strip()
         except:
             self.namespace = os.getenv("NAMESPACE", "default")
 
-        self.metrics = {}      
-        self.definitions = {}  
-        
+        self.metrics = {}
+        self.definitions = {}
+
         try:
             config.load_incluster_config()
         except:
             config.load_kube_config()
-        
+
         self.custom_api = client.CustomObjectsApi()
 
     def resolve_path(self, item, path, is_label=False):
@@ -46,28 +72,24 @@ class GenericCrdExporter:
                 is_length_query = True
                 search_path = path[:-7]
 
-            # Use the extended parser for [?(@...)]
             from jsonpath_ng.ext import parse as ext_parse
             jsonpath_expr = ext_parse(search_path)
             matches = [match.value for match in jsonpath_expr.find(item)]
-            
+
             if not matches:
                 return "unknown" if is_label else 0
 
-            # Unpack first match
             val = matches[0]
 
-            # --- IF IT'S A LABEL, RETURN AS STRING ---
             if is_label:
                 return str(val)
 
-            # --- IF IT'S A VALUE, NORMALIZE TO NUMBER ---
             if is_length_query:
                 return float(len(val)) if isinstance(val, list) else float(len(matches))
 
             if isinstance(val, bool):
                 return 1.0 if val else 0.0
-            
+
             val_str = str(val).strip().lower()
             if val_str in ['true', 'reachable', 'enabled', 'ready', 'ok']:
                 return 1.0
@@ -78,7 +100,7 @@ class GenericCrdExporter:
                 return float(val)
             except:
                 return 0.0
-                
+
         except Exception as e:
             logger.error(f"Path error {path} on {res_name}: {e}")
             return "error" if is_label else 0.0
@@ -87,9 +109,8 @@ class GenericCrdExporter:
         logger.info("Waiting for basic RBAC connectivity...")
         while True:
             try:
-                # Just a simple check to see if the service account can talk to the API
                 self.custom_api.list_namespaced_custom_object(
-                    group="metrics.dynamic.io", 
+                    group="metrics.dynamic.io",
                     version="v1alpha1",
                     namespace=self.namespace,
                     plural="metricdefinitions",
@@ -103,8 +124,6 @@ class GenericCrdExporter:
                     time.sleep(5)
                 else:
                     raise
-
-
 
     def watch_definitions(self):
         """Watcher thread: Reconciles MetricDefinition CRDs."""
@@ -120,15 +139,14 @@ class GenericCrdExporter:
                 ):
                     spec = event['object']['spec']
                     m_name = spec['metricName']
-                    
+
                     if event['type'] in ['ADDED', 'MODIFIED']:
                         label_keys = [lm['label'] for lm in spec['labelMappings']]
                         label_keys.extend(['resource_name', 'resource_namespace'])
-                        
+
                         if m_name not in self.metrics:
-                            # Register gauge ONLY to our clean registry
                             self.metrics[m_name] = Gauge(
-                                m_name, spec.get('help', ''), label_keys, 
+                                m_name, spec.get('help', ''), label_keys,
                                 registry=self.registry
                             )
                         self.definitions[m_name] = spec
@@ -140,15 +158,31 @@ class GenericCrdExporter:
 
             except Exception as e:
                 logger.error(f"Watcher Error: {e}")
+                # If watcher fails, it's a critical issue, mark as unhealthy
+                HEALTH_STATUS["ok"] = False
+                HEALTH_STATUS["message"] = f"MetricDefinition watcher failed: {e}"
                 time.sleep(10)
 
     def scrape_loop(self):
         """Main loop: Scrapes resources and updates gauges."""
-        # Pass the custom registry to the server
+        # Start Prometheus metrics server on port 8080
         start_http_server(8080, registry=self.registry)
         logger.info("Metrics server listening on port 8080 (Strict Mode)")
 
+        # Start health check server on a different port, e.g., 8081
+        health_server_port = 8081
+        health_server = HTTPServer(('', health_server_port), HealthCheckHandler)
+        Thread(target=health_server.serve_forever, daemon=True).start()
+        logger.info(f"Health check server listening on port {health_server_port}")
+
         while True:
+            # Assume healthy at the start of each scrape cycle, unless an error occurs
+            # This allows recovery if RBAC issues are transiently resolved.
+            # If you want it to stay FAILED until restart, remove this line.
+            # For this scenario, based on user's request, we'll keep it FAILED once RBAC issue occurs.
+            # HEALTH_STATUS["ok"] = True
+            # HEALTH_STATUS["message"] = "All metrics are scraping successfully."
+
             for m_name, spec in list(self.definitions.items()):
                 try:
                     res = spec['resource']
@@ -158,29 +192,41 @@ class GenericCrdExporter:
                     )
 
                     gauge = self.metrics[m_name]
-                    # Inside scrape_loop...
                     for item in items.get('items', []):
-                        # Pass is_label=True here so 'type' doesn't become '0'
-                        labels = {lm['label']: str(self.resolve_path(item, lm['path'], is_label=True)) 
+                        labels = {lm['label']: str(self.resolve_path(item, lm['path'], is_label=True))
                                 for lm in spec['labelMappings']}
-                        
+
                         labels['resource_name'] = item['metadata']['name']
                         labels['resource_namespace'] = item['metadata']['namespace']
-                        
-                        # This remains is_label=False (default) for the actual gauge value
+
                         val = self.resolve_path(item, spec['valuePath'])
                         gauge.labels(**labels).set(float(val))
 
                 except ApiException as e:
                     if e.status == 403:
                         logger.warning(
-                            f"RBAC denied for {m_name}. Will retry; assuming propagation delay."
+                            f"RBAC denied for {m_name}. Marking application as unhealthy. Will retry; assuming propagation delay."
                         )
-                        time.sleep(5)
-                        continue                    
+                        HEALTH_STATUS["ok"] = False
+                        HEALTH_STATUS["message"] = f"RBAC denied for metric '{m_name}'. Status 403."
+                        # No need to continue scraping other metrics if RBAC is broken for one.
+                        # The liveness probe will pick this up and restart.
+                        time.sleep(5) # Still wait to avoid busy loop in case of rapid restarts
+                        break # Exit the inner loop to re-evaluate health
                     else:
                         logger.error(f"Scrape Error [{m_name}]: {e}")
-            
+                        HEALTH_STATUS["ok"] = False
+                        HEALTH_STATUS["message"] = f"Scraping error for metric '{m_name}': {e}"
+                        time.sleep(5)
+                        break # Exit the inner loop
+
+                except Exception as e:
+                    logger.error(f"Unexpected error during scrape for [{m_name}]: {e}")
+                    HEALTH_STATUS["ok"] = False
+                    HEALTH_STATUS["message"] = f"Unexpected error during scrape for '{m_name}': {e}"
+                    time.sleep(5)
+                    break # Exit the inner loop
+
             time.sleep(30)
 
 
