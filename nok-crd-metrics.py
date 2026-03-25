@@ -58,7 +58,7 @@ class GenericCrdExporter:
 
         self.metrics = {}
         self.definitions = {}
-        self.custom_api = None # Initialize to None, will be set by _init_kube_client
+        self.api_client = None
         self._init_kube_client() # Initial client setup        
 
     def _init_kube_client(self):
