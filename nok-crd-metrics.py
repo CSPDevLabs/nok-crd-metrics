@@ -69,13 +69,34 @@ class GenericCrdExporter:
             config.load_kube_config()
             logger.info("Loaded kubeconfig.")
         except Exception as e:
-            logger.error(f"Failed to load Kubernetes config: {e}")
-            raise # Re-raise to prevent app from starting without client
+            logger.error(f"Failed to load Kubernetes config or initialize client: {e}")
+            HEALTH_STATUS["ok"] = False
+            HEALTH_STATUS["message"] = f"Client initialization failed: {e}"
+            raise # Re-raise to prevent app from starting without client            
 
-        # Create a new CustomObjectsApi instance
-        self.custom_api = client.CustomObjectsApi()
-        logger.info("Kubernetes CustomObjectsApi client re-initialized.")
+        # Create a *new* Configuration object to ensure no cached settings
+        # from previous client instances are carried over.
+        new_config = Configuration()
+        # Copy relevant settings from the loaded default config
+        new_config.host = Configuration().host
+        new_config.ssl_ca_cert = Configuration().ssl_ca_cert
+        new_config.api_key = Configuration().api_key
+        new_config.api_key_prefix = Configuration().api_key_prefix
+        new_config.verify_ssl = Configuration().verify_ssl
+        new_config.cert_file = Configuration().cert_file
+        new_config.key_file = Configuration().key_file
 
+        # Explicitly create a new ApiClient with a fresh connection pool
+        # This is the key part to force new connections and DNS lookups
+        if self.api_client:
+            # Close existing connection pool if it exists
+            logger.info("Closing existing Kubernetes API client connection pool.")
+            self.api_client.rest_client.pool_manager.clear()
+            self.api_client.close() # Close any open connections
+
+        self.api_client = ApiClient(configuration=new_config)
+        self.custom_api = client.CustomObjectsApi(api_client=self.api_client)
+        logger.info("Kubernetes CustomObjectsApi client re-initialized with new connection pool.")
 
     def resolve_path(self, item, path, is_label=False):
         """Extracts values. Labels stay strings, values become 1/0/float."""
